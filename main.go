@@ -20,6 +20,6 @@ func main() {
 }
 
 func factory(log log.Logger) interface{} {
-	return systemd.NewSingularityDriver(log)
+	return systemd.NewSystemdDriver(log)
 }
 
