@@ -1,9 +1,9 @@
 package systemd
 
 import (
-	"context"
-	"fmt"
-	"time"
+	// "context"
+        // "fmt"
+	// "time"
 
 	hclog "github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/nomad/drivers/shared/eventer"
@@ -28,7 +28,7 @@ var (
 
 	// configSpec is the hcl specification returned by the ConfigSchema RPC
 	configSpec = hclspec.NewObject(map[string]*hclspec.Spec{
-		"enabled": hclspec.NewDefault(
+		/*"enabled": hclspec.NewDefault(
 			hclspec.NewAttr("enabled", "bool", false),
 			hclspec.NewLiteral("true"),
 		),
@@ -40,7 +40,7 @@ var (
 			hclspec.NewAttr("volumes_enabled", "bool", false),
 			hclspec.NewLiteral("true"),
 		),
-		"singularity_cache": hclspec.NewAttr("singularity_cache", "string", false),
+		"singularity_cache": hclspec.NewAttr("singularity_cache", "string", false),*/
 	})
 
 	taskConfigSpec = hclspec.NewObject(map[string]*hclspec.Spec{
@@ -112,17 +112,14 @@ func NewSystemdDriver(logger hclog.Logger) drivers.DriverPlugin {
 	}
 }
 
-// PluginInfo return a base.PluginInfoResponse struct
 func (d *Driver) PluginInfo() (*base.PluginInfoResponse, error) {
 	return pluginInfo, nil
 }
 
-// ConfigSchema return a hclspec.Spec struct
 func (d *Driver) ConfigSchema() (*hclspec.Spec, error) {
 	return configSpec, nil
 }
 
-// SetConfig set the nomad agent config based on base.Config
 func (d *Driver) SetConfig(cfg *base.Config) error {
 	var config Config
 	if len(cfg.PluginConfig) != 0 {
@@ -139,74 +136,61 @@ func (d *Driver) SetConfig(cfg *base.Config) error {
 	return nil
 }
 
-// Shutdown the plugin
 func (d *Driver) Shutdown(ctx context.Context) error {
 	d.signalShutdown()
 	return nil
 }
 
-// TaskConfigSchema returns a hclspec.Spec struct
 func (d *Driver) TaskConfigSchema() (*hclspec.Spec, error) {
-	return taskConfigSpec, nil
+	return nil, nil
 }
 
-// Capabilities a drivers.Capabilities struct
 func (d *Driver) Capabilities() (*drivers.Capabilities, error) {
-	return capabilities, nil
+	return nil, nil
 }
 
-// Fingerprint return the plugin fingerprint
 func (d *Driver) Fingerprint(ctx context.Context) (<-chan *drivers.Fingerprint, error) {
 	return nil, nil
 }
 
 
-// RecoverTask try to recover a failed task, if not return error
 func (d *Driver) RecoverTask(handle *drivers.TaskHandle) error {
 	return nil
 }
 
-// StartTask setup the task exec and calls the container excecutor
 func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drivers.DriverNetwork, error) {
 	return nil, nil, nil
 }
 
-// WaitTask watis for task completion
 func (d *Driver) WaitTask(ctx context.Context, taskID string) (<-chan *drivers.ExitResult, error) {
         return nil, nil
 }
 
-// StopTask shutdown a tasked based on its taskID
 func (d *Driver) StopTask(taskID string, timeout time.Duration, signal string) error {
 	return nil
 }
 
-// DestroyTask delete task
 func (d *Driver) DestroyTask(taskID string, force bool) error {
 	return nil
 }
 
-// InspectTask retrieves task info
 func (d *Driver) InspectTask(taskID string) (*drivers.TaskStatus, error) {
 	return nil, nil
 }
 
-// TaskStats get task stats
 func (d *Driver) TaskStats(ctx context.Context, taskID string, interval time.Duration) (<-chan *drivers.TaskResourceUsage, error) {
 	return nil,nil
 }
 
-// TaskEvents return a chan *drivers.TaskEvent
 func (d *Driver) TaskEvents(ctx context.Context) (<-chan *drivers.TaskEvent, error) {
     return nil,nil
 }
 
-// SignalTask send a specific signal to a taskID
 func (d *Driver) SignalTask(taskID string, signal string) error {
-	return fmt.Errorf("Singularity driver does not support signals")
+        return nil
 }
 
-// ExecTask calls a exec cmd over a running task
+
 func (d *Driver) ExecTask(taskID string, cmd []string, timeout time.Duration) (*drivers.ExecTaskResult, error) {
-	return nil, fmt.Errorf("Singularity driver does not support exec") //TODO
+	return nil, nil
 }
