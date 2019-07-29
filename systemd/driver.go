@@ -1,9 +1,9 @@
 package systemd
 
 import (
-	// "context"
+	"context"
         // "fmt"
-	// "time"
+	"time"
 
 	hclog "github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/nomad/drivers/shared/eventer"
@@ -44,10 +44,7 @@ var (
 	})
 
 	taskConfigSpec = hclspec.NewObject(map[string]*hclspec.Spec{
-		"unit":   hclspec.NewAttr("unit", "string", true),
 		"portable_service":   hclspec.NewAttr("portable_service", "string", true),
-
-
 	})
 
 	// capabilities is returned by the Capabilities RPC and indicates what
@@ -159,6 +156,8 @@ func (d *Driver) RecoverTask(handle *drivers.TaskHandle) error {
 }
 
 func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drivers.DriverNetwork, error) {
+        // portablectl attach --runtime  <name>
+        // systemctl start <name>.service
 	return nil, nil, nil
 }
 
