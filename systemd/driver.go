@@ -1,4 +1,5 @@
 package systemd
+
 // Some reading material
 //  * https://systemd.io/CGROUP_DELEGATION.html
 //  * https://events.static.linuxfound.org/sites/events/files/slides/cgroup_and_namespaces.pdf
@@ -18,57 +19,20 @@ import (
 	// "fmt"
 	"time"
 
-	unit "github.com/coreos/go-systemd/unit"
+	// unit "github.com/coreos/go-systemd/unit"
 	hclog "github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/nomad/drivers/shared/eventer"
 	"github.com/hashicorp/nomad/plugins/base"
 	"github.com/hashicorp/nomad/plugins/drivers"
 	"github.com/hashicorp/nomad/plugins/shared/hclspec"
-	// 	pstructs "github.com/hashicorp/nomad/plugins/shared/structs"
+	pstructs "github.com/hashicorp/nomad/plugins/shared/structs"
 )
 
 const (
-	pluginName = "systemd"
+	pluginName        = "systemd"
+	fingerprintPeriod = 30 * time.Second
 )
 
-var (
-	// pluginInfo is the response returned for the PluginInfo RPC
-	pluginInfo = &base.PluginInfoResponse{
-		Type:              base.PluginTypeDriver,
-		PluginApiVersions: []string{"0.1.0"},
-		PluginVersion:     "0.0.1",
-		Name:              pluginName,
-	}
-
-	// configSpec is the hcl specification returned by the ConfigSchema RPC
-	configSpec = hclspec.NewObject(map[string]*hclspec.Spec{
-		/*"enabled": hclspec.NewDefault(
-			hclspec.NewAttr("enabled", "bool", false),
-			hclspec.NewLiteral("true"),
-		),
-		"no_cgroups": hclspec.NewDefault(
-			hclspec.NewAttr("no_cgroups", "bool", false),
-			hclspec.NewLiteral("false"),
-		),
-		"volumes_enabled": hclspec.NewDefault(
-			hclspec.NewAttr("volumes_enabled", "bool", false),
-			hclspec.NewLiteral("true"),
-		),
-		"singularity_cache": hclspec.NewAttr("singularity_cache", "string", false),*/
-	})
-
-	taskConfigSpec = hclspec.NewObject(map[string]*hclspec.Spec{
-		"portable_service": hclspec.NewAttr("portable_service", "string", true),
-	})
-
-	// capabilities is returned by the Capabilities RPC and indicates what
-	// optional features this driver supports
-	capabilities = &drivers.Capabilities{
-		SendSignals: true,
-		Exec:        true,
-		FSIsolation: drivers.FSIsolationChroot,
-	}
-)
 
 type Driver struct {
 	// eventer is used to handle multiplexing of TaskEvents calls such that an
@@ -100,8 +64,7 @@ type Config struct {
 
 // TaskConfig is the driver configuration of a task within a job
 type TaskConfig struct {
-	Unit            string   `codec:"unit"`
-	PortableService []string `codec:"args"`
+	Unit string `codec:"unit"`
 }
 
 // NewSingularityDriver returns a new DriverPlugin implementation
@@ -119,11 +82,21 @@ func NewSystemdDriver(logger hclog.Logger) drivers.DriverPlugin {
 }
 
 func (d *Driver) PluginInfo() (*base.PluginInfoResponse, error) {
-	return pluginInfo, nil
+	return &base.PluginInfoResponse{
+		Type:              base.PluginTypeDriver,
+		PluginApiVersions: []string{"0.1.0"},
+		PluginVersion:     "0.0.1",
+		Name:              pluginName,
+	}, nil
 }
 
 func (d *Driver) ConfigSchema() (*hclspec.Spec, error) {
-	return configSpec, nil
+	return hclspec.NewObject(map[string]*hclspec.Spec{
+		/*"enabled": hclspec.NewDefault(
+			hclspec.NewAttr("enabled", "bool", false),
+			hclspec.NewLiteral("true"),
+		),*/
+	}), nil
 }
 
 func (d *Driver) SetConfig(cfg *base.Config) error {
@@ -152,56 +125,83 @@ func (d *Driver) TaskConfigSchema() (*hclspec.Spec, error) {
 }
 
 func (d *Driver) Capabilities() (*drivers.Capabilities, error) {
-	return nil, nil
+	return &drivers.Capabilities{
+		SendSignals: true,
+		Exec:        false, // TODO: can probably implement
+		FSIsolation: drivers.FSIsolationChroot,
+	}, nil
 }
 
 func (d *Driver) Fingerprint(ctx context.Context) (<-chan *drivers.Fingerprint, error) {
-        // TODO Send an initial fingerprint
-        // TODO send periodic fingerprints
-	return nil, nil
+	ch := make(chan *drivers.Fingerprint)
+	ticker := time.NewTimer(0)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-d.ctx.Done():
+				return
+			case <-ticker.C:
+				ticker.Reset(fingerprintPeriod)
+				ch <- &drivers.Fingerprint{
+					Health:            drivers.HealthStateHealthy,
+					Attributes:        map[string]*pstructs.Attribute{},
+					HealthDescription: "not implemented",
+				}
+			}
+		}
+	}()
+	return ch, nil
 }
 
 func (d *Driver) RecoverTask(handle *drivers.TaskHandle) error {
-        // TODO systemctl status <task-id>
+	// TODO systemctl status <task-id>
 	return nil
 }
 
 func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drivers.DriverNetwork, error) {
+
+	// taskConfigSpec = hclspec.NewObject(map[string]*hclspec.Spec{
+	// "portable_service": hclspec.NewAttr("portable_service", "string", true),
+	//		"unit": hclspec.NewAttr("unit", "string", true),
+	//	})
 	// portablectl attach --runtime  <name>
-	var opts []*unit.UnitOption
-	append(opts,
-		&unit.UnitOption{
-			Section: "Service",
-			Name:    "BindPaths",
-			Value:   "/alloc:TODO",
-		},
-		&unit.UnitOption{
-			Section: "Service",
-			Name:    "BindPaths",
-			Value:   "/local:TODO",
-		},
-		&unit.UnitOption{
-			Section: "Service",
-			Name:    "BindPaths",
-			Value:   "/secrets:TODO",
-		},
-	)
+	// var opts []*unit.UnitOption
+	// append(opts,
+	// 	&unit.UnitOption{
+	// 		Section: "Service",
+	// 		Name:    "BindPaths",
+	// 		Value:   "/alloc:TODO",
+	// 	},
+	// 	&unit.UnitOption{
+	// 		Section: "Service",
+	// 		Name:    "BindPaths",
+	// 		Value:   "/local:TODO",
+	// 	},
+	// 	&unit.UnitOption{
+	// 		Section: "Service",
+	// 		Name:    "BindPaths",
+	// 		Value:   "/secrets:TODO",
+	// 	},
+	// )
 
-        // TODO: Wait for answer on https://groups.google.com/forum/#!topic/nomad-tool/eegWfX2zngw
-        // because the nomad code is a bit confusing in this regard
+	// TODO: Wait for answer on https://groups.google.com/forum/#!topic/nomad-tool/eegWfX2zngw
+	// because the nomad code is a bit confusing in this regard
 
-        // or whatever the go syntax is, fucking pscho
-        for _, mount : range(cfg.Mounts) {
-          append(opts, &unit.UnitOption {
-            Section: "Service",
-            Name: "BindPaths",
-            Value:  "TODO",
-          })
-        }
-        for _, device : range(cfg.Devices) {
-            // TODO BindPaths
-            // TODO DeviceAllow=rwm
-        }
+	// or whatever the go syntax is, fucking pscho
+	// for _, mount := range(cfg.Mounts) {
+	//   append(opts, &unit.UnitOption {
+	//     Section: "Service",
+	//     Name: "BindPaths",
+	//     Value:  "TODO",
+	//   })
+	// }
+
+	// for _, device := range(cfg.Devices) {
+	//     // TODO BindPaths
+	//     // TODO DeviceAllow=rwm
+	// }
 
 	// TODO systemctl start <name>.service
 	return nil, nil, nil
@@ -212,33 +212,33 @@ func (d *Driver) WaitTask(ctx context.Context, taskID string) (<-chan *drivers.E
 }
 
 func (d *Driver) StopTask(taskID string, timeout time.Duration, signal string) error {
-        // TODO systemctl set-property KillTimeoutOrSoemthing timeout
-        // TODO systemctl stop
+	// TODO systemctl set-property KillTimeoutOrSoemthing timeout
+	// TODO systemctl stop
 	return nil
 }
 
 func (d *Driver) DestroyTask(taskID string, force bool) error {
-        // TODO portablectl detach
+	// TODO portablectl detach
 	return nil
 }
 
 func (d *Driver) InspectTask(taskID string) (*drivers.TaskStatus, error) {
-        // TODO systemctl show
+	// TODO systemctl show
 	return nil, nil
 }
 
 func (d *Driver) TaskStats(ctx context.Context, taskID string, interval time.Duration) (<-chan *drivers.TaskResourceUsage, error) {
-        // TODO query cgroup hierarchy for stats periodically.
+	// TODO query cgroup hierarchy for stats periodically.
 	return nil, nil
 }
 
 func (d *Driver) TaskEvents(ctx context.Context) (<-chan *drivers.TaskEvent, error) {
-        // TODO
+	// TODO
 	return nil, nil
 }
 
 func (d *Driver) SignalTask(taskID string, signal string) error {
-        // TODO systemctl kill -s
+	// TODO systemctl kill -s
 	return nil
 }
 
