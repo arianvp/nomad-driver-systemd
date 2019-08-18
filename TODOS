@@ -1,0 +1,3 @@
+Figure out why plugin.Kill() doesn't kill gracefully.
+It's fine but still weird
+

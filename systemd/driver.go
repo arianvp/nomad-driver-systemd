@@ -16,10 +16,12 @@ package systemd
 
 import (
 	"context"
-	// "fmt"
+	"fmt"
 	"time"
+        "sync"
 
-	// unit "github.com/coreos/go-systemd/unit"
+	unit "github.com/coreos/go-systemd/unit"
+	dbus "github.com/coreos/go-systemd/dbus"
 	hclog "github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/nomad/drivers/shared/eventer"
 	"github.com/hashicorp/nomad/plugins/base"
@@ -33,11 +35,33 @@ const (
 	fingerprintPeriod = 30 * time.Second
 )
 
+// singletons! yuck! but I'm not sure how else to accomplish this shared global
+// piece of state
+var (
+        once sync.Once
+	conn *dbus.Conn
+)
+
+// TODO close the dbus connection on exit
+func getConn() (*dbus.Conn, error) {
+        var err error
+	once.Do(func() {
+	        conn, err = dbus.New()
+	})
+        if err != nil {
+          return nil, err
+        }
+	return conn, nil
+}
 
 type Driver struct {
 	// eventer is used to handle multiplexing of TaskEvents calls such that an
 	// event can be broadcast to all callers
 	eventer *eventer.Eventer
+
+        // DBus connection to systemd
+        // This will be null initially
+        conn *dbus.Conn
 
 	// config is the driver configuration set by the SetConfig RPC
 	config *Config
@@ -67,7 +91,13 @@ type TaskConfig struct {
 	Unit string `codec:"unit"`
 }
 
-// NewSingularityDriver returns a new DriverPlugin implementation
+type TaskState struct {
+    conn dbus.Conn
+}
+
+
+
+// why doesn't this get a ctx as an arugment? Who knows!!
 func NewSystemdDriver(logger hclog.Logger) drivers.DriverPlugin {
 	ctx, cancel := context.WithCancel(context.Background())
 	logger = logger.Named(pluginName)
@@ -92,11 +122,17 @@ func (d *Driver) PluginInfo() (*base.PluginInfoResponse, error) {
 
 func (d *Driver) ConfigSchema() (*hclspec.Spec, error) {
 	return hclspec.NewObject(map[string]*hclspec.Spec{
-		/*"enabled": hclspec.NewDefault(
+		"enabled": hclspec.NewDefault(
 			hclspec.NewAttr("enabled", "bool", false),
 			hclspec.NewLiteral("true"),
-		),*/
+		),
 	}), nil
+}
+
+// This is marked as internal, but seems to be the only way to cancel our Context?
+// TODO: ask about this on the mailing list?
+func (d *Driver) Shutdown() {
+    d.signalShutdown()
 }
 
 func (d *Driver) SetConfig(cfg *base.Config) error {
@@ -115,13 +151,10 @@ func (d *Driver) SetConfig(cfg *base.Config) error {
 	return nil
 }
 
-func (d *Driver) Shutdown(ctx context.Context) error {
-	d.signalShutdown()
-	return nil
-}
-
 func (d *Driver) TaskConfigSchema() (*hclspec.Spec, error) {
-	return nil, nil
+	return hclspec.NewObject(map[string]*hclspec.Spec{
+		"unit": hclspec.NewAttr("unit", "string", true),
+	}), nil
 }
 
 func (d *Driver) Capabilities() (*drivers.Capabilities, error) {
@@ -134,25 +167,45 @@ func (d *Driver) Capabilities() (*drivers.Capabilities, error) {
 
 func (d *Driver) Fingerprint(ctx context.Context) (<-chan *drivers.Fingerprint, error) {
 	ch := make(chan *drivers.Fingerprint)
-	ticker := time.NewTimer(0)
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-d.ctx.Done():
-				return
-			case <-ticker.C:
-				ticker.Reset(fingerprintPeriod)
-				ch <- &drivers.Fingerprint{
-					Health:            drivers.HealthStateHealthy,
-					Attributes:        map[string]*pstructs.Attribute{},
-					HealthDescription: "not implemented",
-				}
-			}
-		}
-	}()
+	go d.handleFingerprint(ctx, ch)
 	return ch, nil
+}
+
+func (d *Driver) handleFingerprint(ctx context.Context, ch chan<- *drivers.Fingerprint) {
+	defer close(ch)
+	ticker := time.NewTimer(0)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-d.ctx.Done():
+			return
+		case <-ticker.C:
+			ticker.Reset(fingerprintPeriod)
+			ch <- d.buildFingerprint()
+		}
+	}
+}
+
+func (d *Driver) buildFingerprint() *drivers.Fingerprint {
+	var health drivers.HealthState
+	var desc string
+	attrs := map[string]*pstructs.Attribute{}
+
+	if d.config.Enabled {
+		health = drivers.HealthStateHealthy
+		desc = "ready"
+		// attrs["driver.lxc"] = pstructs.NewBoolAttribute(true)
+		// ttrs["driver.lxc.version"] = pstructs.NewStringAttribute(lxcVersion)
+	} else {
+		health = drivers.HealthStateUndetected
+	}
+
+	return &drivers.Fingerprint{
+		Attributes:        attrs,
+		Health:            health,
+		HealthDescription: desc,
+	}
 }
 
 func (d *Driver) RecoverTask(handle *drivers.TaskHandle) error {
@@ -160,61 +213,112 @@ func (d *Driver) RecoverTask(handle *drivers.TaskHandle) error {
 	return nil
 }
 
+
 func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drivers.DriverNetwork, error) {
+	var driverConfig TaskConfig
+	if err := cfg.DecodeDriverConfig(&driverConfig); err != nil {
+		return nil, nil, fmt.Errorf("failed to decode driver config: %v", err)
+	}
 
-	// taskConfigSpec = hclspec.NewObject(map[string]*hclspec.Spec{
-	// "portable_service": hclspec.NewAttr("portable_service", "string", true),
-	//		"unit": hclspec.NewAttr("unit", "string", true),
-	//	})
-	// portablectl attach --runtime  <name>
-	// var opts []*unit.UnitOption
-	// append(opts,
-	// 	&unit.UnitOption{
-	// 		Section: "Service",
-	// 		Name:    "BindPaths",
-	// 		Value:   "/alloc:TODO",
-	// 	},
-	// 	&unit.UnitOption{
-	// 		Section: "Service",
-	// 		Name:    "BindPaths",
-	// 		Value:   "/local:TODO",
-	// 	},
-	// 	&unit.UnitOption{
-	// 		Section: "Service",
-	// 		Name:    "BindPaths",
-	// 		Value:   "/secrets:TODO",
-	// 	},
-	// )
+	// TODO we should check if this task already exists
+	handle := drivers.NewTaskHandle(0)
+	handle.Config = cfg
 
-	// TODO: Wait for answer on https://groups.google.com/forum/#!topic/nomad-tool/eegWfX2zngw
-	// because the nomad code is a bit confusing in this regard
+	conn, err := getConn()
+	if err != nil {
+		return nil, nil, fmt.Errorf("Failed to connect to dbus: %s", err)
+	}
 
-	// or whatever the go syntax is, fucking pscho
-	// for _, mount := range(cfg.Mounts) {
-	//   append(opts, &unit.UnitOption {
-	//     Section: "Service",
-	//     Name: "BindPaths",
-	//     Value:  "TODO",
-	//   })
-	// }
+	taskDir := cfg.TaskDir()
+	mounts := cfg.Mounts
+	devices := cfg.Devices
 
-	// for _, device := range(cfg.Devices) {
-	//     // TODO BindPaths
-	//     // TODO DeviceAllow=rwm
-	// }
+	mounts = append(mounts,
+		&drivers.MountConfig{
+			HostPath: taskDir.LocalDir,
+			TaskPath: "/local",
+		},
+		&drivers.MountConfig{
+			HostPath: taskDir.SharedAllocDir,
+			TaskPath: "/alloc",
+		},
+		&drivers.MountConfig{
+			HostPath: taskDir.SecretsDir,
+			TaskPath: "/secrets",
+		},
+	)
+
+        opts := []*unit.UnitOption{}
+	for _, mount := range mounts {
+		opts = append(opts, mountToUnitOption(mount))
+	}
+	for _, device := range devices {
+		opts = append(opts, deviceToUnitOptions(device)...)
+	}
+
+        // TODO perhaps we want to wait for the job to start up
+        _, err = conn.StartUnit(driverConfig.Unit, "replace", nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("Failed to start unit: %s", err)
+	}
+
+
+	// TODO write
+
+	// TODO portablectl attach --runtime  <name>
+	// TODO write the drop-in unit to disk and systemctl daemon-reload
 
 	// TODO systemctl start <name>.service
-	return nil, nil, nil
+
+	return handle, nil, nil
+}
+
+func deviceToUnitOptions(device *drivers.DeviceConfig) []*unit.UnitOption {
+	var opts []*unit.UnitOption
+        opts = append(opts, &unit.UnitOption {
+		Section: "Service",
+		Name:    "BindPaths",
+		Value:   fmt.Sprintf("%s:%s", device.HostPath, device.TaskPath),
+        })
+        opts = append(opts, &unit.UnitOption {
+		Section: "Service",
+		Name:    "DeviceAllow",
+		Value:   fmt.Sprintf("%s %s", device.HostPath, device.Permissions),
+        })
+	return nil
+}
+func mountToUnitOption(mount *drivers.MountConfig) *unit.UnitOption {
+	var bindPath string
+	if mount.Readonly {
+		bindPath = "BindPaths"
+	} else {
+		bindPath = "ReadOnlyBindPaths"
+	}
+	return &unit.UnitOption{
+		Section: "Service",
+		Name:    bindPath,
+		Value:   fmt.Sprintf("%s:%s", mount.HostPath, mount.TaskPath),
+	}
 }
 
 func (d *Driver) WaitTask(ctx context.Context, taskID string) (<-chan *drivers.ExitResult, error) {
-	return nil, nil
+        
+	return nil, fmt.Errorf("nooo")
 }
 
 func (d *Driver) StopTask(taskID string, timeout time.Duration, signal string) error {
 	// TODO systemctl set-property KillTimeoutOrSoemthing timeout
 	// TODO systemctl stop
+        // TODO what to do when it doesn't stop?
+        // TODO store task id somewhere
+	/* conn, err := getConn()
+	if err != nil {
+		fmt.Errorf("Failed to connect to dbus: %s", err)
+	} */
+
+        d.logger.Debug("Success")
 	return nil
+
 }
 
 func (d *Driver) DestroyTask(taskID string, force bool) error {
@@ -224,24 +328,23 @@ func (d *Driver) DestroyTask(taskID string, force bool) error {
 
 func (d *Driver) InspectTask(taskID string) (*drivers.TaskStatus, error) {
 	// TODO systemctl show
-	return nil, nil
+	return nil, fmt.Errorf("InspectTask")
 }
 
 func (d *Driver) TaskStats(ctx context.Context, taskID string, interval time.Duration) (<-chan *drivers.TaskResourceUsage, error) {
 	// TODO query cgroup hierarchy for stats periodically.
-	return nil, nil
+	return nil, nil // fmt.Errorf("TaskStats")
 }
 
 func (d *Driver) TaskEvents(ctx context.Context) (<-chan *drivers.TaskEvent, error) {
-	// TODO
-	return nil, nil
+        return d.eventer.TaskEvents(ctx)
 }
 
 func (d *Driver) SignalTask(taskID string, signal string) error {
 	// TODO systemctl kill -s
-	return nil
+	return fmt.Errorf("SignalTask")
 }
 
 func (d *Driver) ExecTask(taskID string, cmd []string, timeout time.Duration) (*drivers.ExecTaskResult, error) {
-	return nil, nil
+	return nil, fmt.Errorf("ExecTask")
 }

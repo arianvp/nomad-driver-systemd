@@ -3,6 +3,7 @@ module github.com/arianvp/nomad-driver-systemd
 require (
 	github.com/LK4D4/joincontext v0.0.0-20171026170139-1724345da6d5 // indirect
 	github.com/coreos/go-systemd v0.0.0-20190719114852-fd7a80b32e1f
+	github.com/godbus/dbus v0.0.0-20190726142602-4481cbc300e2 // indirect
 	github.com/golang/protobuf v1.3.2 // indirect
 	github.com/gorhill/cronexpr v0.0.0-20180427100037-88b0669f7d75 // indirect
 	github.com/hashicorp/consul/api v1.1.0 // indirect

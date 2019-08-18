@@ -1,25 +1,12 @@
 job "webserver" {
-  region = "us"
-  datacenters = ["us-west-1", "us-east-1"]
+  datacenters = ["dc1"]
   type = "service"
   group "webserver" {
-    count = 4
-    task "nginx" {
+    count = 1
+    task "systemd-portabled" {
       driver = "systemd"
       config {
-        image = "local/nginx.raw"
-        unit = "nginx@${NOMAD_ALLOC_INDEX}.service"
-      }
-      artifact {
-        source = "https://example.com/nginx.raw"
-        options {
-          checksum = "sha256:12391239";
-        };
-      }
-      resources {
-        network {
-          port "http" {}
-        }
+        unit = "systemd-portabled.service"
       }
     }
   }
