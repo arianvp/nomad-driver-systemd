@@ -374,7 +374,7 @@ func (d *Driver) StopTask(taskID string, timeout time.Duration, signal string) e
 	// We ignore the signal argument
 	conn, err := d.getConn()
 	if err != nil {
-		return fmt.Errorf("Failed to connect to dbus: %s", err)
+		return fmt.Errorf("Failed to connect to dbus: %v", err)
 	}
 
 	handle, ok := d.tasks.Get(taskID)
@@ -414,8 +414,49 @@ func (d *Driver) DestroyTask(taskID string, force bool) error {
 }
 
 func (d *Driver) InspectTask(taskID string) (*drivers.TaskStatus, error) {
-	// TODO systemctl show
-	return nil, fmt.Errorf("InspectTask")
+	handle, ok := d.tasks.Get(taskID)
+	if !ok {
+		return nil, drivers.ErrTaskNotFound
+	}
+	taskStatus := drivers.TaskStatus{}
+	conn, err := d.getConn()
+	if err != nil {
+		return nil, fmt.Errorf("Failed to connect to dbus: %v", err)
+	}
+	var driverConfig TaskConfig
+	if err := handle.handle.Config.DecodeDriverConfig(&driverConfig); err != nil {
+		return nil, fmt.Errorf("failed to decode driver config: %v", err)
+	}
+        statuses, err := conn.ListUnitsByNames([]string{driverConfig.Unit})
+	if err := handle.handle.Config.DecodeDriverConfig(&driverConfig); err != nil {
+		return nil, fmt.Errorf("failed to get unit status: %v", err)
+	}
+        status := statuses[0]
+
+        taskStatus.Name = status.Name
+        taskStatus.ID = taskID
+        taskStatus.State =  toTaskState(status.ActiveState)
+        // TODO StartedAt, CompletedAt
+        // TODO ExitResult
+
+	return &taskStatus, nil
+}
+
+func toTaskState(activeState string) drivers.TaskState {
+	switch activeState {
+	case "activating":
+		return drivers.TaskStateUnknown
+	case "deactivating":
+		return drivers.TaskStateUnknown
+	case "failed":
+		return drivers.TaskStateExited
+	case "active":
+		return drivers.TaskStateRunning
+	case "inactive":
+		return drivers.TaskStateExited
+	default:
+		return drivers.TaskStateUnknown
+	}
 }
 
 func (d *Driver) TaskStats(ctx context.Context, taskID string, interval time.Duration) (<-chan *drivers.TaskResourceUsage, error) {
@@ -428,10 +469,9 @@ func (d *Driver) TaskEvents(ctx context.Context) (<-chan *drivers.TaskEvent, err
 }
 
 func (d *Driver) SignalTask(taskID string, signal string) error {
-	// TODO systemctl kill -s
 	return fmt.Errorf("SignalTask not supported")
 }
 
 func (d *Driver) ExecTask(taskID string, cmd []string, timeout time.Duration) (*drivers.ExecTaskResult, error) {
-	return nil, fmt.Errorf("ExecTask")
+	return nil, fmt.Errorf("ExecTask not supported")
 }
