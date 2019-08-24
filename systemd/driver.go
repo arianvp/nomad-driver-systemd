@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"sync"
 	"time"
 
@@ -38,23 +39,20 @@ const (
 	unitsPath         = "/run/systemd/system"
 )
 
-// singletons! yuck! but I'm not sure how else to accomplish this shared global
-// piece of state
-var (
-	once sync.Once
-	conn *dbus.Conn
-)
-
-// TODO close the dbus connection on exit
-func getConn() (*dbus.Conn, error) {
+func (d *Driver) getConn() (*dbus.Conn, error) {
 	var err error
-	once.Do(func() {
+	d.once.Do(func() {
+		var conn *dbus.Conn
 		conn, err = dbus.New()
+		if err != nil {
+			return
+		}
+		d.conn = conn
 	})
 	if err != nil {
 		return nil, err
 	}
-	return conn, nil
+	return d.conn, nil
 }
 
 type Driver struct {
@@ -66,6 +64,8 @@ type Driver struct {
 	// This will be null initially
 	conn *dbus.Conn
 
+	once sync.Once
+
 	// config is the driver configuration set by the SetConfig RPC
 	config *Config
 
@@ -76,9 +76,12 @@ type Driver struct {
 	// coordinate shutdown
 	ctx context.Context
 
-	// signalShutdown is called when the driver is shutting down and cancels the
+	// cancel is called when the driver is shutting down and cancels the
 	// ctx passed to any subsystems
-	signalShutdown context.CancelFunc
+	cancel context.CancelFunc
+
+	// in memory mapping of taskIDs to taskHandles
+	tasks taskStore
 
 	// logger will log to the Nomad agent
 	logger hclog.Logger
@@ -94,22 +97,19 @@ type TaskConfig struct {
 	Unit string `codec:"unit"`
 }
 
-type TaskState struct {
-	conn dbus.Conn
-}
-
 // why doesn't this get a ctx as an arugment? Who knows!!
 func NewSystemdDriver(logger hclog.Logger) drivers.DriverPlugin {
 	// question is;
 	ctx, cancel := context.WithCancel(context.Background())
+	// I think this is not needed
 	logger = logger.Named(pluginName)
 
 	return &Driver{
-		eventer:        eventer.NewEventer(ctx, logger),
-		config:         &Config{},
-		ctx:            ctx,
-		signalShutdown: cancel,
-		logger:         logger,
+		eventer: eventer.NewEventer(ctx, logger),
+		config:  &Config{},
+		ctx:     ctx,
+		cancel:  cancel,
+		logger:  logger,
 	}
 }
 
@@ -176,10 +176,11 @@ func (d *Driver) handleFingerprint(ctx context.Context, ch chan<- *drivers.Finge
 	for {
 		select {
 		case <-ctx.Done():
-			// TODO this seems to make sense
-			d.signalShutdown()
+			// TODO this seems to make sense. If the caller context completes, we should complete
+			d.cancel()
 			return
 		case <-d.ctx.Done():
+			// If we're odne we're done, right?
 			return
 		case <-ticker.C:
 			ticker.Reset(fingerprintPeriod)
@@ -188,6 +189,7 @@ func (d *Driver) handleFingerprint(ctx context.Context, ch chan<- *drivers.Finge
 	}
 }
 
+// TODO do actual health check??
 func (d *Driver) buildFingerprint() *drivers.Fingerprint {
 	var health drivers.HealthState
 	var desc string
@@ -207,8 +209,15 @@ func (d *Driver) buildFingerprint() *drivers.Fingerprint {
 	}
 }
 
+// TODO implement
 func (d *Driver) RecoverTask(handle *drivers.TaskHandle) error {
-	// TODO systemctl status <task-id>
+	if handle == nil {
+		return fmt.Errorf("error: handle cannot be nil")
+	}
+	if _, ok := d.tasks.Get(handle.Config.ID); ok {
+		return nil
+	}
+
 	return nil
 }
 
@@ -221,11 +230,6 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 	// TODO we should check if this task already exists
 	handle := drivers.NewTaskHandle(0)
 	handle.Config = cfg
-
-	conn, err := getConn()
-	if err != nil {
-		return nil, nil, fmt.Errorf("Failed to connect to dbus: %s", err)
-	}
 
 	taskDir := cfg.TaskDir()
 	mounts := cfg.Mounts
@@ -254,13 +258,23 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 
 	unitName := driverConfig.Unit
 	unitContent := unit.Serialize(opts)
-	unitFile, err := os.Create(unitsPath + "/" + unitName)
+	dropinDir := path.Join(unitsPath, unitName+".d")
+	err := os.MkdirAll(dropinDir, 0755)
+	if err != nil {
+		return nil, nil, fmt.Errorf("Failed to write unit file override: %s", err)
+	}
+	unitFile, err := os.Create(path.Join(dropinDir, "nomad.conf"))
 	if err != nil {
 		return nil, nil, fmt.Errorf("Failed to write unit file override: %s", err)
 	}
 	_, err = io.Copy(unitFile, unitContent)
 	if err != nil {
 		return nil, nil, fmt.Errorf("Failed to write unit file override: %s", err)
+	}
+
+	conn, err := d.getConn()
+	if err != nil {
+		return nil, nil, fmt.Errorf("Failed to connect to dbus: %s", err)
 	}
 
 	// TODO daemon-reload. maybe we don't need it
@@ -271,12 +285,11 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 		return nil, nil, fmt.Errorf("Failed to start unit: %s", err)
 	}
 
-	// TODO write
-
-	// TODO portablectl attach --runtime  <name>
-	// TODO write the drop-in unit to disk and systemctl daemon-reload
-
-	// TODO systemctl start <name>.service
+	// keep around the handle
+	subscription := conn.NewSubscriptionSet()
+	subscription.Add(unitName)
+	h := &taskHandle{handle: handle, subscription: subscription}
+	d.tasks.Set(cfg.ID, h)
 
 	return handle, nil, nil
 }
@@ -300,7 +313,7 @@ func mountToUnitOption(mount *drivers.MountConfig) *unit.UnitOption {
 	if mount.Readonly {
 		bindPath = "BindPaths"
 	} else {
-		bindPath = "ReadOnlyBindPaths"
+		bindPath = "BindReadOnlyPaths"
 	}
 	return &unit.UnitOption{
 		Section: "Service",
@@ -310,11 +323,72 @@ func mountToUnitOption(mount *drivers.MountConfig) *unit.UnitOption {
 }
 
 func (d *Driver) WaitTask(ctx context.Context, taskID string) (<-chan *drivers.ExitResult, error) {
+	ch := make(chan *drivers.ExitResult)
 
-	return nil, fmt.Errorf("nooo")
+	handle, ok := d.tasks.Get(taskID)
+	if !ok {
+		return nil, drivers.ErrTaskNotFound
+	}
+
+	var driverConfig TaskConfig
+	if err := handle.handle.Config.DecodeDriverConfig(&driverConfig); err != nil {
+		return nil, fmt.Errorf("failed to decode driver config: %v", err)
+	}
+	unitStatus, errs := handle.subscription.Subscribe()
+
+	go func() {
+		defer close(ch)
+		for {
+			select {
+			case <-ctx.Done():
+				ch <- &drivers.ExitResult{Err: ctx.Err()}
+				return
+			case err := <-errs:
+				ch <- &drivers.ExitResult{Err: fmt.Errorf("Subscription error: %s", err)}
+				return
+			case statuses := <-unitStatus:
+				status := statuses[driverConfig.Unit]
+				if status == nil {
+					// TODO only now; but in the future maybe multiple units can be present? IDK
+					panic("should never happen by construction")
+				}
+				switch status.ActiveState {
+				case "inactive":
+					ch <- &drivers.ExitResult{}
+					return
+				case "failed":
+                                        // TODO report a failed status
+					ch <- &drivers.ExitResult{}
+					return
+				default:
+					break
+				}
+
+			}
+		}
+	}()
+	return ch, nil
 }
 
 func (d *Driver) StopTask(taskID string, timeout time.Duration, signal string) error {
+	// We ignore the signal argument
+	conn, err := d.getConn()
+	if err != nil {
+		return fmt.Errorf("Failed to connect to dbus: %s", err)
+	}
+
+	handle, ok := d.tasks.Get(taskID)
+	if !ok {
+		return drivers.ErrTaskNotFound
+	}
+	var driverConfig TaskConfig
+	if err := handle.handle.Config.DecodeDriverConfig(&driverConfig); err != nil {
+		return fmt.Errorf("failed to decode driver config: %v", err)
+	}
+
+	// TODO StopUnit optionally takes a Channel that can be used for implementing WaitUnit
+	conn.StopUnit(driverConfig.Unit, "replace", nil)
+
 	// TODO systemctl set-property KillTimeoutOrSoemthing timeout
 	// TODO systemctl stop
 	// TODO what to do when it doesn't stop?
@@ -329,8 +403,13 @@ func (d *Driver) StopTask(taskID string, timeout time.Duration, signal string) e
 
 }
 
+///    StartTask ->  RecoverTask ---/
+
 func (d *Driver) DestroyTask(taskID string, force bool) error {
 	// TODO portablectl detach
+
+	// TODO check if container is running and check force
+	d.tasks.Delete(taskID)
 	return nil
 }
 
@@ -350,7 +429,7 @@ func (d *Driver) TaskEvents(ctx context.Context) (<-chan *drivers.TaskEvent, err
 
 func (d *Driver) SignalTask(taskID string, signal string) error {
 	// TODO systemctl kill -s
-	return fmt.Errorf("SignalTask")
+	return fmt.Errorf("SignalTask not supported")
 }
 
 func (d *Driver) ExecTask(taskID string, cmd []string, timeout time.Duration) (*drivers.ExecTaskResult, error) {
