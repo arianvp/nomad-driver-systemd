@@ -1,6 +1,6 @@
-.PHONY: plugins/nomad-systemd-driver
-plugins/nomad-systemd-driver:
-	go build -o plugins/nomad-systemd-driver
+.PHONY: plugins/nomad-driver-systemd
+plugins/nomad-driver-systemd:
+	go build -o plugins/nomad-driver-systems
 
 
 install:
