@@ -240,12 +240,12 @@ func taskConfigToUnitOptions(cfg *drivers.TaskConfig) []*unit.UnitOption {
 	opts = append(opts, &unit.UnitOption{
 		Section: "Service",
 		Name:    "CPUShares",
-		Value:   fmt.Sprintf("%d",cfg.Resources.LinuxResources.CPUShares),
+		Value:   fmt.Sprintf("%d", cfg.Resources.LinuxResources.CPUShares),
 	})
 	opts = append(opts, &unit.UnitOption{
 		Section: "Service",
 		Name:    "MemoryLimit",
-		Value:   fmt.Sprintf("%d",cfg.Resources.LinuxResources.MemoryLimitBytes),
+		Value:   fmt.Sprintf("%d", cfg.Resources.LinuxResources.MemoryLimitBytes),
 	})
 	//	Devices         []*DeviceConfig
 	for _, device := range cfg.Devices {
@@ -256,11 +256,14 @@ func taskConfigToUnitOptions(cfg *drivers.TaskConfig) []*unit.UnitOption {
 		opts = append(opts, mountToUnitOption(mount))
 	}
 	//	User            string
-	opts = append(opts, &unit.UnitOption{
-		Section: "Service",
-		Name:    "User",
-		Value:   cfg.User,
-	})
+	if cfg.User != "" {
+		opts = append(opts, &unit.UnitOption{
+			Section: "Service",
+			Name:    "User",
+			Value:   cfg.User,
+		})
+	}
+	// TODO: Group ? should be on the driverConfig
 	//	AllocDir        string
 	taskDir := cfg.TaskDir()
 	taskDirMounts := []*drivers.MountConfig{
@@ -300,11 +303,13 @@ func taskConfigToUnitOptions(cfg *drivers.TaskConfig) []*unit.UnitOption {
 }
 
 func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drivers.DriverNetwork, error) {
+	if _, ok := d.tasks.Get(cfg.ID); ok {
+		return nil, nil, fmt.Errorf("taskConfig with ID '%s' already started", cfg.ID)
+	}
 	var driverConfig TaskConfig
 	if err := cfg.DecodeDriverConfig(&driverConfig); err != nil {
 		return nil, nil, fmt.Errorf("failed to decode driver config: %v", err)
 	}
-	// TODO we should check if this task already exists and crash if so
 	handle := drivers.NewTaskHandle(0)
 	handle.Config = cfg
 	opts := taskConfigToUnitOptions(cfg)
