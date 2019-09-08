@@ -4,9 +4,9 @@ import "sync"
 import "github.com/hashicorp/nomad/plugins/drivers"
 import "github.com/coreos/go-systemd/dbus"
 
-type taskHandle struct{
-  subscription *dbus.SubscriptionSet
-  handle *drivers.TaskHandle
+type taskHandle struct {
+	subscription *dbus.SubscriptionSet
+	handle       *drivers.TaskHandle
 }
 
 // a typesafe adapter of sync.Map
@@ -25,9 +25,13 @@ func (ts *taskStore) Set(id string, handle *taskHandle) {
 
 func (ts *taskStore) Get(id string) (*taskHandle, bool) {
 	v, ok := ts.store.Load(id)
-	return v.(*taskHandle), ok
+	if ok {
+		return v.(*taskHandle), ok
+	} else {
+		return nil, ok
+	}
 }
 
 func (ts *taskStore) Delete(id string) {
-        ts.store.Delete(id)
+	ts.store.Delete(id)
 }
