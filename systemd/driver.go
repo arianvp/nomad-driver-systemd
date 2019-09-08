@@ -21,6 +21,7 @@ import (
 	"os"
 	"path"
 	"sync"
+	"strings"
 	"time"
 
 	"github.com/coreos/go-systemd/dbus"
@@ -255,6 +256,14 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 	for _, device := range devices {
 		opts = append(opts, deviceToUnitOptions(device)...)
 	}
+
+
+        env := strings.Join(cfg.EnvList(), " ")
+	opts = append(opts, &unit.UnitOption{
+		Section: "Service",
+		Name:    "Environment",
+		Value:   env,
+	})
 
 	unitName := driverConfig.Unit
 	unitContent := unit.Serialize(opts)
