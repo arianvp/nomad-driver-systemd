@@ -210,7 +210,6 @@ func (d *Driver) buildFingerprint() *drivers.Fingerprint {
 	}
 }
 
-// TODO implement
 func (d *Driver) RecoverTask(handle *drivers.TaskHandle) error {
 	if handle == nil {
 		return fmt.Errorf("error: handle cannot be nil")
@@ -218,7 +217,19 @@ func (d *Driver) RecoverTask(handle *drivers.TaskHandle) error {
 	if _, ok := d.tasks.Get(handle.Config.ID); ok {
 		return nil
 	}
-
+        cfg := handle.Config
+	var driverConfig TaskConfig
+	if err := cfg.DecodeDriverConfig(&driverConfig); err != nil {
+		return fmt.Errorf("failed to decode driver config: %v", err)
+	}
+	conn, err := d.getConn()
+	if err != nil {
+		return fmt.Errorf("Failed to connect to dbus: %s", err)
+	}
+	subscription := conn.NewSubscriptionSet()
+	subscription.Add(driverConfig.Unit)
+	h := &taskHandle{handle: handle, subscription: subscription}
+	d.tasks.Set(cfg.ID, h)
 	return nil
 }
 
