@@ -20,8 +20,8 @@ import (
 	"io"
 	"os"
 	"path"
-	"sync"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coreos/go-systemd/dbus"
@@ -222,20 +222,48 @@ func (d *Driver) RecoverTask(handle *drivers.TaskHandle) error {
 	return nil
 }
 
-func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drivers.DriverNetwork, error) {
-	var driverConfig TaskConfig
-	if err := cfg.DecodeDriverConfig(&driverConfig); err != nil {
-		return nil, nil, fmt.Errorf("failed to decode driver config: %v", err)
+func taskConfigToUnitOptions(cfg *drivers.TaskConfig) []*unit.UnitOption {
+	opts := []*unit.UnitOption{}
+	//	ID              string
+	//	JobName         string
+	//	TaskGroupName   string
+	//	Name            string
+	//	Env             map[string]string
+	env := strings.Join(cfg.EnvList(), " ")
+	opts = append(opts, &unit.UnitOption{
+		Section: "Service",
+		Name:    "Environment",
+		Value:   env,
+	})
+	//	DeviceEnv       map[string]string
+	//	Resources       *Resources
+	opts = append(opts, &unit.UnitOption{
+		Section: "Service",
+		Name:    "CPUShares",
+		Value:   fmt.Sprintf("%d",cfg.Resources.LinuxResources.CPUShares),
+	})
+	opts = append(opts, &unit.UnitOption{
+		Section: "Service",
+		Name:    "MemoryLimit",
+		Value:   fmt.Sprintf("%d",cfg.Resources.LinuxResources.MemoryLimitBytes),
+	})
+	//	Devices         []*DeviceConfig
+	for _, device := range cfg.Devices {
+		opts = append(opts, deviceToUnitOptions(device)...)
 	}
-
-	// TODO we should check if this task already exists
-	handle := drivers.NewTaskHandle(0)
-	handle.Config = cfg
-
+	//	Mounts          []*MountConfig
+	for _, mount := range cfg.Mounts {
+		opts = append(opts, mountToUnitOption(mount))
+	}
+	//	User            string
+	opts = append(opts, &unit.UnitOption{
+		Section: "Service",
+		Name:    "User",
+		Value:   cfg.User,
+	})
+	//	AllocDir        string
 	taskDir := cfg.TaskDir()
-	mounts := cfg.Mounts
-	devices := cfg.Devices
-	mounts = append(mounts,
+	taskDirMounts := []*drivers.MountConfig{
 		&drivers.MountConfig{
 			HostPath: taskDir.LocalDir,
 			TaskPath: "/local",
@@ -248,23 +276,38 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 			HostPath: taskDir.SecretsDir,
 			TaskPath: "/secrets",
 		},
-	)
-	opts := []*unit.UnitOption{}
-	for _, mount := range mounts {
+	}
+	for _, mount := range taskDirMounts {
 		opts = append(opts, mountToUnitOption(mount))
 	}
-	for _, device := range devices {
-		opts = append(opts, deviceToUnitOptions(device)...)
-	}
 
-
-        env := strings.Join(cfg.EnvList(), " ")
+	//	rawDriverConfig []byte
+	//	StdoutPath      string
 	opts = append(opts, &unit.UnitOption{
 		Section: "Service",
-		Name:    "Environment",
-		Value:   env,
+		Name:    "StandardOutput",
+		Value:   fmt.Sprintf("file:%s", cfg.StdoutPath),
 	})
+	//	StderrPath      string
+	opts = append(opts, &unit.UnitOption{
+		Section: "Service",
+		Name:    "StandardError",
+		Value:   fmt.Sprintf("file:%s", cfg.StderrPath),
+	})
+	//	AllocID         string
 
+	return opts
+}
+
+func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drivers.DriverNetwork, error) {
+	var driverConfig TaskConfig
+	if err := cfg.DecodeDriverConfig(&driverConfig); err != nil {
+		return nil, nil, fmt.Errorf("failed to decode driver config: %v", err)
+	}
+	// TODO we should check if this task already exists and crash if so
+	handle := drivers.NewTaskHandle(0)
+	handle.Config = cfg
+	opts := taskConfigToUnitOptions(cfg)
 	unitName := driverConfig.Unit
 	unitContent := unit.Serialize(opts)
 	dropinDir := path.Join(unitsPath, unitName+".d")
@@ -280,26 +323,21 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 	if err != nil {
 		return nil, nil, fmt.Errorf("Failed to write unit file override: %s", err)
 	}
-
 	conn, err := d.getConn()
 	if err != nil {
 		return nil, nil, fmt.Errorf("Failed to connect to dbus: %s", err)
 	}
-
 	// TODO daemon-reload. maybe we don't need it
-
 	// TODO perhaps we want to wait for the job to start up
 	_, err = conn.StartUnit(unitName, "replace", nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("Failed to start unit: %s", err)
 	}
-
 	// keep around the handle
 	subscription := conn.NewSubscriptionSet()
 	subscription.Add(unitName)
 	h := &taskHandle{handle: handle, subscription: subscription}
 	d.tasks.Set(cfg.ID, h)
-
 	return handle, nil, nil
 }
 
@@ -366,7 +404,7 @@ func (d *Driver) WaitTask(ctx context.Context, taskID string) (<-chan *drivers.E
 					ch <- &drivers.ExitResult{}
 					return
 				case "failed":
-                                        // TODO report a failed status
+					// TODO report a failed status
 					ch <- &drivers.ExitResult{}
 					return
 				default:
@@ -436,17 +474,17 @@ func (d *Driver) InspectTask(taskID string) (*drivers.TaskStatus, error) {
 	if err := handle.handle.Config.DecodeDriverConfig(&driverConfig); err != nil {
 		return nil, fmt.Errorf("failed to decode driver config: %v", err)
 	}
-        statuses, err := conn.ListUnitsByNames([]string{driverConfig.Unit})
+	statuses, err := conn.ListUnitsByNames([]string{driverConfig.Unit})
 	if err := handle.handle.Config.DecodeDriverConfig(&driverConfig); err != nil {
 		return nil, fmt.Errorf("failed to get unit status: %v", err)
 	}
-        status := statuses[0]
+	status := statuses[0]
 
-        taskStatus.Name = status.Name
-        taskStatus.ID = taskID
-        taskStatus.State =  toTaskState(status.ActiveState)
-        // TODO StartedAt, CompletedAt
-        // TODO ExitResult
+	taskStatus.Name = status.Name
+	taskStatus.ID = taskID
+	taskStatus.State = toTaskState(status.ActiveState)
+	// TODO StartedAt, CompletedAt
+	// TODO ExitResult
 
 	return &taskStatus, nil
 }
