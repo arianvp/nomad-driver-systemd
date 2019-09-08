@@ -243,6 +243,9 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 	}
 	handle := drivers.NewTaskHandle(0)
 	handle.Config = cfg
+
+        // Write the unit file options
+        // TODO maybe first check if the unit exists before writing these?!
 	opts := taskConfigToUnitOptions(cfg)
 	unitName := driverConfig.Unit
 	unitContent := unit.Serialize(opts)
@@ -263,8 +266,7 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 	if err != nil {
 		return nil, nil, fmt.Errorf("Failed to connect to dbus: %s", err)
 	}
-	// TODO daemon-reload. maybe we don't need it
-	// TODO perhaps we want to wait for the job to start up
+        conn.Reload()
 	_, err = conn.StartUnit(unitName, "replace", nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("Failed to start unit: %s", err)
