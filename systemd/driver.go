@@ -217,7 +217,7 @@ func (d *Driver) RecoverTask(handle *drivers.TaskHandle) error {
 	if _, ok := d.tasks.Get(handle.Config.ID); ok {
 		return nil
 	}
-        cfg := handle.Config
+	cfg := handle.Config
 	var driverConfig TaskConfig
 	if err := cfg.DecodeDriverConfig(&driverConfig); err != nil {
 		return fmt.Errorf("failed to decode driver config: %v", err)
@@ -231,6 +231,199 @@ func (d *Driver) RecoverTask(handle *drivers.TaskHandle) error {
 	h := &taskHandle{handle: handle, subscription: subscription}
 	d.tasks.Set(cfg.ID, h)
 	return nil
+}
+
+func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drivers.DriverNetwork, error) {
+	if _, ok := d.tasks.Get(cfg.ID); ok {
+		return nil, nil, fmt.Errorf("taskConfig with ID '%s' already started", cfg.ID)
+	}
+	var driverConfig TaskConfig
+	if err := cfg.DecodeDriverConfig(&driverConfig); err != nil {
+		return nil, nil, fmt.Errorf("failed to decode driver config: %v", err)
+	}
+	handle := drivers.NewTaskHandle(0)
+	handle.Config = cfg
+	opts := taskConfigToUnitOptions(cfg)
+	unitName := driverConfig.Unit
+	unitContent := unit.Serialize(opts)
+	dropinDir := path.Join(unitsPath, unitName+".d")
+	err := os.MkdirAll(dropinDir, 0755)
+	if err != nil {
+		return nil, nil, fmt.Errorf("Failed to write unit file override: %s", err)
+	}
+	unitFile, err := os.Create(path.Join(dropinDir, "nomad.conf"))
+	if err != nil {
+		return nil, nil, fmt.Errorf("Failed to write unit file override: %s", err)
+	}
+	_, err = io.Copy(unitFile, unitContent)
+	if err != nil {
+		return nil, nil, fmt.Errorf("Failed to write unit file override: %s", err)
+	}
+	conn, err := d.getConn()
+	if err != nil {
+		return nil, nil, fmt.Errorf("Failed to connect to dbus: %s", err)
+	}
+	// TODO daemon-reload. maybe we don't need it
+	// TODO perhaps we want to wait for the job to start up
+	_, err = conn.StartUnit(unitName, "replace", nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("Failed to start unit: %s", err)
+	}
+	// keep around the handle
+	subscription := conn.NewSubscriptionSet()
+	subscription.Add(unitName)
+	h := &taskHandle{handle: handle, subscription: subscription}
+	d.tasks.Set(cfg.ID, h)
+	return handle, nil, nil
+}
+
+func (d *Driver) WaitTask(ctx context.Context, taskID string) (<-chan *drivers.ExitResult, error) {
+	ch := make(chan *drivers.ExitResult)
+
+	handle, ok := d.tasks.Get(taskID)
+	if !ok {
+		return nil, drivers.ErrTaskNotFound
+	}
+
+	var driverConfig TaskConfig
+	if err := handle.handle.Config.DecodeDriverConfig(&driverConfig); err != nil {
+		return nil, fmt.Errorf("failed to decode driver config: %v", err)
+	}
+	unitStatus, errs := handle.subscription.Subscribe()
+
+	go func() {
+		defer close(ch)
+		for {
+			select {
+			case <-ctx.Done():
+				ch <- &drivers.ExitResult{Err: ctx.Err()}
+				return
+			case err := <-errs:
+				ch <- &drivers.ExitResult{Err: fmt.Errorf("Subscription error: %s", err)}
+				return
+			case statuses := <-unitStatus:
+				status := statuses[driverConfig.Unit]
+				if status == nil {
+					// TODO only now; but in the future maybe multiple units can be present? IDK
+					panic("should never happen by construction")
+				}
+				switch status.ActiveState {
+				case "inactive":
+					ch <- &drivers.ExitResult{}
+					return
+				case "failed":
+					// TODO report a failed status
+					ch <- &drivers.ExitResult{}
+					return
+				default:
+					break
+				}
+
+			}
+		}
+	}()
+	return ch, nil
+}
+
+func (d *Driver) StopTask(taskID string, timeout time.Duration, signal string) error {
+	// We ignore the signal argument
+	conn, err := d.getConn()
+	if err != nil {
+		return fmt.Errorf("Failed to connect to dbus: %v", err)
+	}
+
+	handle, ok := d.tasks.Get(taskID)
+	if !ok {
+		return drivers.ErrTaskNotFound
+	}
+	var driverConfig TaskConfig
+	if err := handle.handle.Config.DecodeDriverConfig(&driverConfig); err != nil {
+		return fmt.Errorf("failed to decode driver config: %v", err)
+	}
+
+	// TODO StopUnit optionally takes a Channel that can be used for implementing WaitUnit
+	conn.StopUnit(driverConfig.Unit, "replace", nil)
+
+	// TODO systemctl set-property KillTimeoutOrSoemthing timeout
+	// TODO what to do when it doesn't stop?
+	// TODO store task id somewhere
+
+	return nil
+
+}
+
+///    StartTask ->  RecoverTask ---/
+
+func (d *Driver) DestroyTask(taskID string, force bool) error {
+	// TODO portablectl detach
+
+	// TODO check if container is running and check force
+        // TODO remove subcription?
+	d.tasks.Delete(taskID)
+	return nil
+}
+
+func (d *Driver) InspectTask(taskID string) (*drivers.TaskStatus, error) {
+	handle, ok := d.tasks.Get(taskID)
+	if !ok {
+		return nil, drivers.ErrTaskNotFound
+	}
+	taskStatus := drivers.TaskStatus{}
+	conn, err := d.getConn()
+	if err != nil {
+		return nil, fmt.Errorf("Failed to connect to dbus: %v", err)
+	}
+	var driverConfig TaskConfig
+	if err := handle.handle.Config.DecodeDriverConfig(&driverConfig); err != nil {
+		return nil, fmt.Errorf("failed to decode driver config: %v", err)
+	}
+	statuses, err := conn.ListUnitsByNames([]string{driverConfig.Unit})
+	if err := handle.handle.Config.DecodeDriverConfig(&driverConfig); err != nil {
+		return nil, fmt.Errorf("failed to get unit status: %v", err)
+	}
+	status := statuses[0]
+
+	taskStatus.Name = status.Name
+	taskStatus.ID = taskID
+	taskStatus.State = toTaskState(status.ActiveState)
+	// TODO StartedAt, CompletedAt
+	// TODO ExitResult
+
+	return &taskStatus, nil
+}
+
+func toTaskState(activeState string) drivers.TaskState {
+	switch activeState {
+	case "activating":
+		return drivers.TaskStateUnknown
+	case "deactivating":
+		return drivers.TaskStateUnknown
+	case "failed":
+		return drivers.TaskStateExited
+	case "active":
+		return drivers.TaskStateRunning
+	case "inactive":
+		return drivers.TaskStateExited
+	default:
+		return drivers.TaskStateUnknown
+	}
+}
+
+func (d *Driver) TaskStats(ctx context.Context, taskID string, interval time.Duration) (<-chan *drivers.TaskResourceUsage, error) {
+	// TODO query cgroup hierarchy for stats periodically.
+	return nil, nil // fmt.Errorf("TaskStats")
+}
+
+func (d *Driver) TaskEvents(ctx context.Context) (<-chan *drivers.TaskEvent, error) {
+	return d.eventer.TaskEvents(ctx)
+}
+
+func (d *Driver) SignalTask(taskID string, signal string) error {
+	return fmt.Errorf("SignalTask not supported")
+}
+
+func (d *Driver) ExecTask(taskID string, cmd []string, timeout time.Duration) (*drivers.ExecTaskResult, error) {
+	return nil, fmt.Errorf("ExecTask not supported")
 }
 
 func taskConfigToUnitOptions(cfg *drivers.TaskConfig) []*unit.UnitOption {
@@ -313,50 +506,6 @@ func taskConfigToUnitOptions(cfg *drivers.TaskConfig) []*unit.UnitOption {
 	return opts
 }
 
-func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drivers.DriverNetwork, error) {
-	if _, ok := d.tasks.Get(cfg.ID); ok {
-		return nil, nil, fmt.Errorf("taskConfig with ID '%s' already started", cfg.ID)
-	}
-	var driverConfig TaskConfig
-	if err := cfg.DecodeDriverConfig(&driverConfig); err != nil {
-		return nil, nil, fmt.Errorf("failed to decode driver config: %v", err)
-	}
-	handle := drivers.NewTaskHandle(0)
-	handle.Config = cfg
-	opts := taskConfigToUnitOptions(cfg)
-	unitName := driverConfig.Unit
-	unitContent := unit.Serialize(opts)
-	dropinDir := path.Join(unitsPath, unitName+".d")
-	err := os.MkdirAll(dropinDir, 0755)
-	if err != nil {
-		return nil, nil, fmt.Errorf("Failed to write unit file override: %s", err)
-	}
-	unitFile, err := os.Create(path.Join(dropinDir, "nomad.conf"))
-	if err != nil {
-		return nil, nil, fmt.Errorf("Failed to write unit file override: %s", err)
-	}
-	_, err = io.Copy(unitFile, unitContent)
-	if err != nil {
-		return nil, nil, fmt.Errorf("Failed to write unit file override: %s", err)
-	}
-	conn, err := d.getConn()
-	if err != nil {
-		return nil, nil, fmt.Errorf("Failed to connect to dbus: %s", err)
-	}
-	// TODO daemon-reload. maybe we don't need it
-	// TODO perhaps we want to wait for the job to start up
-	_, err = conn.StartUnit(unitName, "replace", nil)
-	if err != nil {
-		return nil, nil, fmt.Errorf("Failed to start unit: %s", err)
-	}
-	// keep around the handle
-	subscription := conn.NewSubscriptionSet()
-	subscription.Add(unitName)
-	h := &taskHandle{handle: handle, subscription: subscription}
-	d.tasks.Set(cfg.ID, h)
-	return handle, nil, nil
-}
-
 func deviceToUnitOptions(device *drivers.DeviceConfig) []*unit.UnitOption {
 	var opts []*unit.UnitOption
 	opts = append(opts, &unit.UnitOption{
@@ -383,158 +532,4 @@ func mountToUnitOption(mount *drivers.MountConfig) *unit.UnitOption {
 		Name:    bindPath,
 		Value:   fmt.Sprintf("%s:%s", mount.HostPath, mount.TaskPath),
 	}
-}
-
-func (d *Driver) WaitTask(ctx context.Context, taskID string) (<-chan *drivers.ExitResult, error) {
-	ch := make(chan *drivers.ExitResult)
-
-	handle, ok := d.tasks.Get(taskID)
-	if !ok {
-		return nil, drivers.ErrTaskNotFound
-	}
-
-	var driverConfig TaskConfig
-	if err := handle.handle.Config.DecodeDriverConfig(&driverConfig); err != nil {
-		return nil, fmt.Errorf("failed to decode driver config: %v", err)
-	}
-	unitStatus, errs := handle.subscription.Subscribe()
-
-	go func() {
-		defer close(ch)
-		for {
-			select {
-			case <-ctx.Done():
-				ch <- &drivers.ExitResult{Err: ctx.Err()}
-				return
-			case err := <-errs:
-				ch <- &drivers.ExitResult{Err: fmt.Errorf("Subscription error: %s", err)}
-				return
-			case statuses := <-unitStatus:
-				status := statuses[driverConfig.Unit]
-				if status == nil {
-					// TODO only now; but in the future maybe multiple units can be present? IDK
-					panic("should never happen by construction")
-				}
-				switch status.ActiveState {
-				case "inactive":
-					ch <- &drivers.ExitResult{}
-					return
-				case "failed":
-					// TODO report a failed status
-					ch <- &drivers.ExitResult{}
-					return
-				default:
-					break
-				}
-
-			}
-		}
-	}()
-	return ch, nil
-}
-
-func (d *Driver) StopTask(taskID string, timeout time.Duration, signal string) error {
-	// We ignore the signal argument
-	conn, err := d.getConn()
-	if err != nil {
-		return fmt.Errorf("Failed to connect to dbus: %v", err)
-	}
-
-	handle, ok := d.tasks.Get(taskID)
-	if !ok {
-		return drivers.ErrTaskNotFound
-	}
-	var driverConfig TaskConfig
-	if err := handle.handle.Config.DecodeDriverConfig(&driverConfig); err != nil {
-		return fmt.Errorf("failed to decode driver config: %v", err)
-	}
-
-	// TODO StopUnit optionally takes a Channel that can be used for implementing WaitUnit
-	conn.StopUnit(driverConfig.Unit, "replace", nil)
-
-	// TODO systemctl set-property KillTimeoutOrSoemthing timeout
-	// TODO systemctl stop
-	// TODO what to do when it doesn't stop?
-	// TODO store task id somewhere
-	/* conn, err := getConn()
-	if err != nil {
-		fmt.Errorf("Failed to connect to dbus: %s", err)
-	} */
-
-	d.logger.Debug("Success")
-	return nil
-
-}
-
-///    StartTask ->  RecoverTask ---/
-
-func (d *Driver) DestroyTask(taskID string, force bool) error {
-	// TODO portablectl detach
-
-	// TODO check if container is running and check force
-	d.tasks.Delete(taskID)
-	return nil
-}
-
-func (d *Driver) InspectTask(taskID string) (*drivers.TaskStatus, error) {
-	handle, ok := d.tasks.Get(taskID)
-	if !ok {
-		return nil, drivers.ErrTaskNotFound
-	}
-	taskStatus := drivers.TaskStatus{}
-	conn, err := d.getConn()
-	if err != nil {
-		return nil, fmt.Errorf("Failed to connect to dbus: %v", err)
-	}
-	var driverConfig TaskConfig
-	if err := handle.handle.Config.DecodeDriverConfig(&driverConfig); err != nil {
-		return nil, fmt.Errorf("failed to decode driver config: %v", err)
-	}
-	statuses, err := conn.ListUnitsByNames([]string{driverConfig.Unit})
-	if err := handle.handle.Config.DecodeDriverConfig(&driverConfig); err != nil {
-		return nil, fmt.Errorf("failed to get unit status: %v", err)
-	}
-	status := statuses[0]
-
-	taskStatus.Name = status.Name
-	taskStatus.ID = taskID
-	taskStatus.State = toTaskState(status.ActiveState)
-	// TODO StartedAt, CompletedAt
-	// TODO ExitResult
-
-	return &taskStatus, nil
-}
-
-func toTaskState(activeState string) drivers.TaskState {
-	switch activeState {
-	case "activating":
-		return drivers.TaskStateUnknown
-	case "deactivating":
-		return drivers.TaskStateUnknown
-	case "failed":
-		return drivers.TaskStateExited
-	case "active":
-		return drivers.TaskStateRunning
-	case "inactive":
-		return drivers.TaskStateExited
-	default:
-		return drivers.TaskStateUnknown
-	}
-}
-
-func (d *Driver) TaskStats(ctx context.Context, taskID string, interval time.Duration) (<-chan *drivers.TaskResourceUsage, error) {
-	// TODO query cgroup hierarchy for stats periodically.
-	return nil, nil // fmt.Errorf("TaskStats")
-}
-
-func (d *Driver) TaskEvents(ctx context.Context) (<-chan *drivers.TaskEvent, error) {
-	return d.eventer.TaskEvents(ctx)
-}
-
-func (d *Driver) SignalTask(taskID string, signal string) error {
-	return fmt.Errorf("SignalTask not supported")
-}
-
-func (d *Driver) ExecTask(taskID string, cmd []string, timeout time.Duration) (*drivers.ExecTaskResult, error) {
-	return nil, fmt.Errorf("ExecTask not supported")
 }
