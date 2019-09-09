@@ -2,11 +2,16 @@ job "webserver" {
   datacenters = ["dc1"]
   type = "service"
   group "webserver" {
-    count = 1
-    task "systemd-portabled" {
+    count = 5
+    task "webserver" {
       driver = "systemd"
       config {
-        unit = "systemd-portabled.service"
+        unit = "webserver@${NOMAD_ALLOC_ID}.service"
+      }
+      resources {
+        network {
+          port "http" {}
+        }
       }
     }
   }

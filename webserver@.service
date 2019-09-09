@@ -1,0 +1,2 @@
+[Service]
+ExecStart=/usr/bin/python3 -m http.server $NOMAD_PORT_webserver
