@@ -354,13 +354,11 @@ func (d *Driver) StopTask(taskID string, timeout time.Duration, signal string) e
 
 }
 
-///    StartTask ->  RecoverTask ---/
-
 func (d *Driver) DestroyTask(taskID string, force bool) error {
 	// TODO portablectl detach
-
 	// TODO check if container is running and check force
         // TODO remove subcription?
+        // TODO remove the drop-in folder?
 	d.tasks.Delete(taskID)
 	return nil
 }
